@@ -22,10 +22,10 @@ class BaseBackend(object):
         pass
 
     def encode_result(self, result, status):
-        if status == states.SUCCESS:
-            return self.prepare_value(result)
-        elif status in self.EXCEPTION_STATES:
+        if status in self.EXCEPTION_STATES:
             return self.prepare_exception(result)
+        else:
+            return self.prepare_value(result)
 
     def store_result(self, task_id, result, status):
         """Store the result and status of a task."""
@@ -157,7 +157,7 @@ class BaseDictBackend(BaseBackend):
 
     def get_traceback(self, task_id):
         """Get the traceback for a failed task."""
-        return self.get_task_meta(task_id)["traceback"]
+        return self.get_task_meta(task_id).get("traceback")
 
     def get_result(self, task_id):
         """Get the result of a task."""

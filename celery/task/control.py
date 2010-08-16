@@ -105,7 +105,8 @@ class inspect(object):
         if not reply:
             return
         by_node = flatten_reply(reply)
-        if not isinstance(self.destination, (list, tuple)):
+        if self.destination and \
+                not isinstance(self.destination, (list, tuple)):
             return by_node.get(self.destination)
         return by_node
 
@@ -129,14 +130,13 @@ class inspect(object):
         return self._request("dump_revoked")
 
     def registered_tasks(self):
-        return self._request("dump_registered_tasks")
+        return self._request("dump_tasks")
 
     def enable_events(self):
         return self._request("enable_events")
 
     def disable_events(self):
         return self._request("disable_events")
-
 
 
 @with_connection

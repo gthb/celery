@@ -8,21 +8,29 @@ import logging
 import traceback
 from multiprocessing.util import Finalize
 
+from celery.utils.timer2 import Timer
+
 from celery import conf
+from celery import log
 from celery import registry
 from celery import platform
 from celery import signals
-from celery.log import setup_logger, _hijack_multiprocessing_logger
+from celery.log import setup_logger
 from celery.beat import EmbeddedClockService
 from celery.utils import noop, instantiate
 
 from celery.worker import state
 from celery.worker.buckets import TaskBucket, FastQueue
-from celery.worker.scheduler import Scheduler
 
 RUN = 0x1
 CLOSE = 0x2
 TERMINATE = 0x3
+
+WORKER_SIGRESET = frozenset(["SIGTERM",
+                             "SIGHUP",
+                             "SIGTTIN",
+                             "SIGTTOU"])
+WORKER_SIGIGNORE = frozenset(["SIGINT"])
 
 
 def process_initializer():
@@ -31,13 +39,8 @@ def process_initializer():
     Used for multiprocessing environments.
 
     """
-    # There seems to a bug in multiprocessing (backport?)
-    # when detached, where the worker gets EOFErrors from time to time
-    # and the logger is left from the parent process causing a crash.
-    _hijack_multiprocessing_logger()
-
-    platform.reset_signal("SIGTERM")
-    platform.ignore_signal("SIGINT")
+    map(platform.reset_signal, WORKER_SIGRESET)
+    map(platform.ignore_signal, WORKER_SIGIGNORE)
     platform.set_mp_process_title("celeryd")
 
     # This is for windows and other platforms not supporting
@@ -61,7 +64,7 @@ class WorkController(object):
     .. attribute:: concurrency
 
         The number of simultaneous processes doing work (default:
-        :const:`celery.conf.CELERYD_CONCURRENCY`)
+        ``conf.CELERYD_CONCURRENCY``)
 
     .. attribute:: loglevel
 
@@ -70,7 +73,7 @@ class WorkController(object):
     .. attribute:: logfile
 
         The logfile used, if no logfile is specified it uses ``stderr``
-        (default: :const:`celery.conf.CELERYD_LOG_FILE`).
+        (default: `celery.conf.CELERYD_LOG_FILE`).
 
     .. attribute:: embed_clockservice
 
@@ -140,6 +143,8 @@ class WorkController(object):
         self.task_soft_time_limit = task_soft_time_limit
         self.max_tasks_per_child = max_tasks_per_child
         self.pool_putlocks = pool_putlocks
+        self.timer_debug = log.SilenceRepeated(self.logger.debug,
+                                               max_iterations=10)
         self.db = db
         self._finalize = Finalize(self, self.stop, exitpriority=1)
 
@@ -152,7 +157,6 @@ class WorkController(object):
             self.ready_queue = FastQueue()
         else:
             self.ready_queue = TaskBucket(task_registry=registry.tasks)
-        self.eta_schedule = Scheduler(self.ready_queue, logger=self.logger)
 
         self.logger.debug("Instantiating thread components...")
 
@@ -168,7 +172,9 @@ class WorkController(object):
                                     callback=self.process_task,
                                     logger=self.logger)
         self.scheduler = instantiate(eta_scheduler_cls,
-                                     self.eta_schedule, logger=self.logger)
+                               precision=conf.CELERYD_ETA_SCHEDULER_PRECISION,
+                               on_error=self.on_timer_error,
+                               on_tick=self.on_timer_tick)
 
         self.clockservice = None
         if self.embed_clockservice:
@@ -178,7 +184,7 @@ class WorkController(object):
         prefetch_count = self.concurrency * conf.CELERYD_PREFETCH_MULTIPLIER
         self.listener = instantiate(listener_cls,
                                     self.ready_queue,
-                                    self.eta_schedule,
+                                    self.scheduler,
                                     logger=self.logger,
                                     hostname=self.hostname,
                                     send_events=self.send_events,
@@ -246,3 +252,11 @@ class WorkController(object):
 
         self.listener.close_connection()
         self._state = TERMINATE
+
+    def on_timer_error(self, exc_info):
+        _, exc, _ = exc_info
+        self.logger.error("Timer error: %r" % (exc, ))
+
+    def on_timer_tick(self, delay):
+        self.timer_debug("Scheduler wake-up! Next eta %s secs." % delay)
+

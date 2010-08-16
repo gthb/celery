@@ -5,6 +5,332 @@
 .. contents::
     :local:
 
+2.1.0
+=====
+:release-date: TBA
+:status: In development.
+:roadmap: http://wiki.github.com/ask/celery/roadmap
+
+Important notes
+---------------
+
+* Celery is now following the versioning semantics defined by `semver`_.
+
+    This means we are no longer allowed to use odd/even versioning semantics
+    (see http://github.com/mojombo/semver.org/issues#issue/8).
+    By our previous versioning scheme this stable release should have
+    been version 2.2.
+
+    The document describing our release cycle and versioning scheme
+    can be found at `Wiki: Release Cycle`_.
+
+.. _`semver`: http://semver.org
+.. _`Wiki: Release Cycle`: http://wiki.github.com/ask/celery/release-cycle.
+
+News
+----
+
+* celeryev: Event Snapshots
+
+    If enabled, celeryd can send messages every time something
+    happens in the worker. These messages are called "events".
+    The events are used by real-time monitors to show what the
+    cluster is doing, but they are not very useful for monitoring
+    over time. That's where the snapshots comes in. Snapshots
+    lets you take "pictures" of the clusters state at regular intervals.
+    These can then be stored in the database to generate statistics
+    with, or even monitoring.
+
+    Django-celery now comes with a Celery monitor for the Django
+    Admin interface. To use this you need to run the django-celery
+    snapshot camera, which stores snapshots to the database at configurable
+    intervals.
+
+    To use the Django admin monitor you need to do the following:
+
+    1. Create the new database tables.
+
+        $ python manage.py syncdb
+
+    2. Start the django-celery snapshot camera::
+
+        $ python manage.py celerycam
+
+    3. Open up the django admin to monitor your cluster.
+
+    The admin interface shows tasks, worker nodes, and even
+    lets you perform some actions, like revoking and rate limiting tasks,
+    and shutting down worker nodes.
+
+    There's also a Debian init.d script for ``celeryev`` available,
+    see :doc:`cookbook/daemonizing` for more information.
+
+    New command line argments to celeryev:
+
+        * ``-c|--camera``: Snapshot camera class to use.
+        * ``--logfile|-f``: Logfile
+        * ``--loglevel|-l``: Loglevel
+        * ``--maxrate|-r``: Shutter rate limit.
+        * ``--freq|-F``: Shutter frequency
+
+    The ``--camera`` argument is the name of a class used to take
+    snapshots with. It must support the interface defined by
+    :class:`celery.events.snapshot.Polaroid`.
+
+    Shutter frequency controls how often the camera thread wakes up,
+    while the rate limit controls how often it will actually take
+    a snapshot.
+    The rate limit can be an integer (snapshots/s), or a rate limit string
+    which has the same syntax as the task rate limit strings (``"200/m"``,
+    ``"10/s"``, ``"1/h",`` etc).
+
+    For the Django camera case, this rate limit can be used to control
+    how often the snapshots are written to the database, and the frequency
+    used to control how often the thread wakes up too check if there's
+    anything new.
+
+    The rate limit is off by default, which means it will take a snapshot
+    for every ``--frequency`` seconds.
+
+    The django-celery camera also automatically deletes old events.
+    It deletes successful tasks after 1 day, failed tasks after 3 days,
+    and tasks in other states after 5 days.
+
+* Added the ability to set an expiry date and time for tasks.
+
+    Example::
+
+        >>> # Task expires after one minute from now.
+        >>> task.apply_async(args, kwargs, expires=60)
+        >>> # Also supports datetime
+        >>> task.apply_async(args, kwargs,
+        ...                  expires=datetime.now() + timedelta(days=1)
+
+    When a worker receives a task that has been expired it will mark
+    the task as revoked (:exc:`celery.exceptions.TaskRevokedError`).
+
+* Changed the way logging is configured.
+
+    We now configure the root logger instead of only configuring
+    our custom logger. In addition we don't hijack
+    the multiprocessing logger anymore, but instead use a custom logger name
+    (celeryd uses "celery", celerybeat uses "celery.beat", celeryev uses
+    "celery.ev").
+
+    This means that the ``loglevel`` and ``logfile`` arguments will
+    affect all registered loggers (even those from 3rd party libraries).
+    That is unless you configure the loggers manually as show below.
+
+    Users can choose to configure logging by subscribing to the
+    :data:`~celery.signals.setup_logging` signal:
+
+    .. code-block:: python
+
+        from logging.config import fileConfig
+        from celery import signals
+
+        def setup_logging(**kwargs):
+            fileConfig("logging.conf")
+        signals.setup_logging.connect(setup_logging)
+
+    If there are no receivers for this signal, the logging subsystem
+    will be configured using the ``--loglevel/--logfile argument``,
+    this will be used for *all defined loggers*.
+
+    Remember that celeryd also redirects stdout and stderr 
+    to the celery logger, if you want to manually configure logging
+    ands redirect stdouts, you need to enable this manually:
+
+    .. code-block:: python
+
+        from logging.config import fileConfig
+        from celery import log
+
+       def setup_logging(**kwargs):
+            import logging
+            fileConfig("logging.conf")
+            stdouts = logging.getLogger("mystdoutslogger")
+            log.redirect_stdouts_to_logger(stdouts, loglevel=logging.WARNING)
+
+* celeryd: Task results shown in logs are now truncated to 46 chars.
+
+* ``Task.__name__`` is now an alias to ``self.__class__.__name__``.
+   This way it introspects more like a regular function.
+
+* ``Task.retry``: Now raises :exc:`TypeError` if kwargs argument is empty.
+
+    See http://github.com/ask/celery/issues/issue/164
+
+* timedelta_seconds: Use ``timedelta.total_seconds`` if running on Python 2.7
+
+* :class:`~celery.datastructures.TokenBucket`: Generic Token Bucket algorithm
+
+* :class:`celery.events.state.State`: Recording of cluster state can now
+  be paused.
+
+    * ``State.freeze(buffer=True)``
+
+    Pauses recording of the stream. If buffer is true, then events received
+    while being frozen will be kept, so it can be replayed later.
+
+    * ``State.thaw(replay=True)``
+
+    Resumes recording of the stream. If replay is true, then the buffer
+    will be applied.
+
+    * ``State.freeze_while(fun)``
+
+    Apply function. Freezes the stream before the function,
+    and replays the buffer when the function returns.
+
+* :meth:`EventReceiver.capture <celery.events.EventReceiver.capture>`
+  Now supports a timeout keyword argument.
+
+Fixes
+-----
+
+* Redis result backend: Redis doesn't have database names,
+  database numbers. The default database is now 0.
+
+* :class:`~celery.task.control.inspect`:
+  Was requesting an invalid command because of a typo.
+
+    See http://github.com/ask/celery/issues/issue/170
+
+* Worker crashed if the value of CELERY_TASK_ERROR_WHITELIST was
+  not iterable
+
+* Compat ``LoggerAdapter`` implementation: Now works for Python 2.4.
+
+    Also added support for several new methods:
+    ``fatal``, ``makeRecord``, ``_log``, ``log``, ``isEnabledFor``,
+    ``addHandler``, ``removeHandler``.
+
+* :func:`~celery.execute.apply`: Make sure ``kwargs["task_id"]`` is
+  always set.
+
+Documentation
+-------------
+
+* Tasks Userguide: Added section on database transactions.
+
+* tutorials/external moved to new section: "community"
+
+
+2.0.2
+=====
+:release-date: 2010-07-22 11:31 A.M CEST
+
+* Routes: When using the dict route syntax, the exchange for a task
+  could dissapear making the task unroutable.
+
+    See http://github.com/ask/celery/issues/issue/158
+
+* Test suite now passing on Python 2.4
+
+* No longer have to type PYTHONPATH=. to use celeryconfig in current dir.
+
+    This is accomplished by the default loader ensuring that the current
+    directory is in ``sys.path`` when loading the config module.
+    ``sys.path`` is reset to its original state after loading.
+
+    Adding cwd to ``sys.path`` without the user knowing may be a security
+    issue, as this means someone can drop a Python module in the users
+    directory that executes arbitrary commands. This was the original reason
+    not to do this, but if done *only when loading the config module*, this
+    means that the behvavior will only apply to the modules imported in the
+    config module, which I think is a good compromise (certainly better than
+    just explictly setting PYTHONPATH=. anyway)
+
+* Experimental Cassandra backend added.
+
+* celeryd: SIGHUP handler accidentally propagated to worker pool processes.
+
+    In combination with 7a7c44e39344789f11b5346e9cc8340f5fe4846c
+    this would make each child process start a new celeryd when
+    the terminal window was closed :/
+
+* celeryd: Do not install SIGHUP handler if running from a terminal.
+
+    This fixes the problem where celeryd is launched in the background
+    when closing the terminal.
+
+* celeryd: Now joins threads at shutdown.
+
+    See http://github.com/ask/celery/issues/issue/152
+
+* Test teardown: Don't use atexit but nose's ``teardown()`` functionality
+  instead.
+
+    See http://github.com/ask/celery/issues/issue/154
+
+* Debian init script for celeryd: Stop now works correctly.
+
+* Task logger:  ``warn`` method added (synonym for ``warning``)
+
+* Can now define a whitelist of errors to send error e-mails for.
+
+    Example::
+
+        CELERY_TASK_ERROR_WHITELIST = ('myapp.MalformedInputError')
+
+    See http://github.com/ask/celery/issues/issue/153
+
+* celeryd: Now handles overflow exceptions in ``time.mktime`` while parsing
+  the ETA field.
+
+* LoggerWrapper: Try to detect loggers logging back to stderr/stdout making
+  an infinite loop.
+
+* Added :class:`celery.task.control.inspect`: Inspects a running worker.
+
+    Examples::
+
+        # Inspect a single worker
+        >>> i = inspect("myworker.example.com")
+
+        # Inspect several workers
+        >>> i = inspect(["myworker.example.com", "myworker2.example.com"])
+
+        # Inspect all workers consuming on this vhost.
+        >>> i = inspect()
+
+        ### Methods
+
+        # Get currently executing tasks
+        >>> i.active()
+
+        # Get currently reserved tasks
+        >>> i.reserved()
+
+        # Get the current eta schedule
+        >>> i.scheduled()
+
+        # Worker statistics and info
+        >>> i.stats()
+
+        # List of currently revoked tasks
+        >>> i.revoked()
+
+        # List of registered tasks
+        >>> i.registered_tasks()
+
+*  Remote control commands ``dump_active``/``dump_reserved``/``dump_schedule``
+   now replies with detailed task requests.
+
+    Containing the original arguments and fields of the task requested.
+
+    In addition the remote control command ``set_loglevel`` has been added,
+    this only changes the loglevel for the main process.
+
+* Worker control command execution now catches errors and returns their
+  string representation in the reply.
+
+* Functional test suite added
+
+    :mod:`celery.tests.functional.case` contains utilities to start
+    and stop an embedded celeryd process, for use in functional testing.
+
 2.0.1
 =====
 :release-date: 2010-07-09 03:02 P.M CEST
@@ -18,7 +344,7 @@
     If you've already hit this problem you may have to delete the
     declaration::
 
-        $ PYTHONPATH=. camqadm exchange.delete celerycrq
+        $ camqadm exchange.delete celerycrq
 
     or::
 
@@ -324,7 +650,7 @@ Backward incompatible changes
     If you've already used celery with this backend chances are you
     have to delete the previous declaration::
 
-        $ PYTHONPATH=. camqadm exchange.delete celeryresults
+        $ camqadm exchange.delete celeryresults
 
 * Now uses pickle instead of cPickle on Python versions <= 2.5
 
@@ -723,7 +1049,7 @@ News
   If you've already used the AMQP backend this means you have to
   delete the previous definitions::
 
-      $ PYTHONPATH=. camqadm exchange.delete celeryresults
+      $ camqadm exchange.delete celeryresults
 
   or::
 

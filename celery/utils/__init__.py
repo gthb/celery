@@ -7,11 +7,13 @@ try:
 except ImportError:
     ctypes = None
 import importlib
+from datetime import datetime
 from uuid import UUID, uuid4, _uuid_generate_random
 from inspect import getargspec
 from itertools import islice
 
 from carrot.utils import rpartition
+from dateutil.parser import parse as parse_iso8601
 
 from celery.utils.compat import all, any, defaultdict
 from celery.utils.timeutils import timedelta_seconds # was here before
@@ -96,6 +98,15 @@ def noop(*args, **kwargs):
 
     """
     pass
+
+
+def maybe_iso8601(dt):
+    """``Either datetime | str -> datetime or None -> None``"""
+    if not dt:
+        return
+    if isinstance(dt, datetime):
+        return dt
+    return parse_iso8601(dt)
 
 
 def kwdict(kwargs):
@@ -342,3 +353,28 @@ def instantiate(name, *args, **kwargs):
 
     """
     return get_cls_by_name(name)(*args, **kwargs)
+
+
+def truncate_text(text, maxlen=128, suffix="..."):
+    """Truncates text to a maximum number of characters."""
+    if len(text) >= maxlen:
+        return text[:maxlen].rsplit(" ", 1)[0] + suffix
+    return text
+
+
+def abbr(S, max, ellipsis="..."):
+    if S is None:
+        return "???"
+    if len(S) > max:
+        return ellipsis and (S[:max-len(ellipsis)] + ellipsis) or S[:max]
+    return S
+
+
+def abbrtask(S, max):
+    if S is None:
+        return "???"
+    if len(S) > max:
+        module, _, cls = rpartition(S, ".")
+        module = abbr(module, max - len(cls), False)
+        return module + "[.]" + cls
+    return S

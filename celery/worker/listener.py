@@ -46,7 +46,7 @@ up and running.
   again, and again.
 
 * If the task has an ETA/countdown, the task is moved to the ``eta_schedule``
-  so the :class:`~celery.worker.scheduler.Scheduler` can schedule it at its
+  so the :class:`timer2.Timer` can schedule it at its
   deadline. Tasks without an eta are moved immediately to the ``ready_queue``,
   so they can be picked up by the :class:`~celery.worker.controllers.Mediator`
   to be sent to the pool.
@@ -80,11 +80,10 @@ import warnings
 
 from datetime import datetime
 
-from dateutil.parser import parse as parse_iso8601
 from carrot.connection import AMQPConnectionException
 
 from celery import conf
-from celery.utils import noop, retry_over_time
+from celery.utils import noop, retry_over_time, maybe_iso8601
 from celery.worker.job import TaskRequest, InvalidTaskError
 from celery.worker.control import ControlDispatch
 from celery.worker.heartbeat import Heart
@@ -249,7 +248,7 @@ class CarrotListener(object):
                 self.qos.update()
             wait_for_message()
 
-    def on_task(self, task, eta=None):
+    def on_task(self, task):
         """Handle received task.
 
         If the task has an ``eta`` we enter it into the ETA schedule,
@@ -260,22 +259,24 @@ class CarrotListener(object):
         if task.revoked():
             return
 
+        self.logger.info("Got task from broker: %s" % (task.shortinfo(), ))
+
         self.event_dispatcher.send("task-received", uuid=task.task_id,
                 name=task.task_name, args=repr(task.args),
-                kwargs=repr(task.kwargs), retries=task.retries, eta=eta)
+                kwargs=repr(task.kwargs), retries=task.retries,
+                eta=task.eta and task.eta.isoformat(),
+                expires=task.expires and task.expires.isoformat())
 
-        if eta:
-            if not isinstance(eta, datetime):
-                eta = parse_iso8601(eta)
+        if task.eta:
             self.qos.increment()
-            self.logger.info("Got task from broker: %s[%s] eta:[%s]" % (
-                    task.task_name, task.task_id, eta))
-            self.eta_schedule.enter(task, eta=eta,
-                    callback=self.qos.decrement_eventually)
+            self.eta_schedule.apply_at(task.eta,
+                                       self.apply_eta_task, (task, ))
         else:
-            self.logger.info("Got task from broker: %s[%s]" % (
-                    task.task_name, task.task_id))
             self.ready_queue.put(task)
+
+    def apply_eta_task(self, task):
+        self.ready_queue.put(task)
+        self.qos.decrement_eventually()
 
     def on_control(self, control):
         """Handle received remote control command."""
@@ -300,7 +301,7 @@ class CarrotListener(object):
                         str(exc), message_data))
                 message.ack()
             else:
-                self.on_task(task, eta=message_data.get("eta"))
+                self.on_task(task)
             return
 
         # Handle control command

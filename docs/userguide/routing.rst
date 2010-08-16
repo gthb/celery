@@ -28,7 +28,7 @@ Say you have two servers, ``x``, and ``y`` that handles regular tasks,
 and one server ``z``, that only handles feed related tasks. You can use this
 configuration::
 
-    CELERY_ROUTES = {"feed.tasks.import_feed": "feeds"}
+    CELERY_ROUTES = {"feed.tasks.import_feed": {"queue": "feeds"}}
 
 With this route enabled import feed tasks will be routed to the
 ``"feeds"`` queue, while all other tasks will be routed to the default queue
@@ -148,7 +148,7 @@ just specify a custom exchange and exchange type:
             },
             "regular_tasks": {
                 "binding_key": "task.#",
-            }
+            },
             "image_tasks": {
                 "binding_key": "image.compress",
                 "exchange": "mediatasks",
@@ -189,7 +189,7 @@ This is an example task message represented as a Python dictionary:
 .. code-block:: python
 
     {"task": "myapp.tasks.add",
-     "id": 
+     "id": "54086c5e-6193-4575-8308-dbab76798756",
      "args": [4, 4],
      "kwargs": {}}
 
@@ -476,7 +476,7 @@ All you need to define a new router is to create a class with a
 
     class MyRouter(object):
 
-        def route_for_task(task, args=None, kwargs=None):
+        def route_for_task(self, task, args=None, kwargs=None):
             if task == "myapp.tasks.compress_video":
                 return {"exchange": "video",
                         "exchange_type": "topic",

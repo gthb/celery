@@ -13,7 +13,6 @@
     celery.worker.job
     celery.worker.controllers
     celery.worker.buckets
-    celery.worker.scheduler
     celery.worker.heartbeat
     celery.worker.control
     celery.worker.control.builtins
@@ -30,6 +29,7 @@
     celery.backends.amqp
     celery.backends.mongodb
     celery.backends.pyredis
+    celery.backends.cassandra
     celery.backends.tyrant
     celery.execute.trace
     celery.serialization

@@ -58,7 +58,6 @@ def set_loglevel(panel, loglevel=None):
     return {"ok": loglevel}
 
 
-
 @Panel.register
 def rate_limit(panel, task_name, rate_limit, **kwargs):
     """Set new rate limit for a task type.
@@ -100,7 +99,7 @@ def rate_limit(panel, task_name, rate_limit, **kwargs):
 
 @Panel.register
 def dump_schedule(panel, safe=False, **kwargs):
-    schedule = panel.listener.eta_schedule
+    schedule = panel.listener.eta_schedule.schedule
     if not schedule.queue:
         panel.logger.info("--Empty schedule--")
         return []
@@ -178,4 +177,4 @@ def ping(panel, **kwargs):
 @Panel.register
 def shutdown(panel, **kwargs):
     panel.logger.critical("Got shutdown from remote.")
-    raise SystemExit
+    raise SystemExit("Got shutdown from remote")
