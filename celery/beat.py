@@ -7,14 +7,14 @@ import time
 import shelve
 import threading
 import multiprocessing
-from datetime import datetime, timedelta
+from datetime import datetime
 from UserDict import UserDict
 
 from celery import log
 from celery import conf
 from celery import platform
 from celery.execute import send_task
-from celery.schedules import schedule
+from celery.schedules import maybe_schedule
 from celery.messaging import establish_connection
 from celery.utils import instantiate
 from celery.utils.info import humanize_seconds
@@ -60,30 +60,43 @@ class ScheduleEntry(object):
 
     """
 
-    def __init__(self, name, schedule, args=(), kwargs={},
-            options={}, last_run_at=None, total_run_count=None):
+    def __init__(self, name, last_run_at=None, total_run_count=None,
+            schedule=None, args=(), kwargs={}, options={}, relative=False):
         self.name = name
-        self.schedule = schedule
+        self.schedule = maybe_schedule(schedule, relative)
         self.args = args
         self.kwargs = kwargs
         self.options = options
         self.last_run_at = last_run_at or datetime.now()
         self.total_run_count = total_run_count or 0
 
-    def next(self):
+    def next(self, last_run_at=None):
         """Returns a new instance of the same class, but with
         its date and count fields updated."""
-        return self.__class__(self.name,
-                              self.schedule,
-                              self.args,
-                              self.kwargs,
-                              self.options,
-                              datetime.now(),
-                              self.total_run_count + 1)
+        last_run_at = last_run_at or datetime.now()
+        total_run_count = self.total_run_count + 1
+        return self.__class__(**dict(self,
+                                     last_run_at=last_run_at,
+                                     total_run_count=total_run_count))
+
+    def update(self, other):
+        """Update values from another entry.
+
+        Does only update "editable" fields (schedule, args,
+        kwargs, options).
+
+        """
+        self.schedule = other.schedule
+        self.args = other.args
+        self.kwargs = other.kwargs
+        self.options = other.options
 
     def is_due(self):
         """See :meth:`celery.task.base.PeriodicTask.is_due`."""
         return self.schedule.is_due(self.last_run_at)
+
+    def __iter__(self):
+        return vars(self).iteritems()
 
     def __repr__(self):
         return "<Entry: %s(*%s, **%s) {%s}>" % (self.name,
@@ -114,19 +127,19 @@ class Scheduler(UserDict):
     """
     Entry = ScheduleEntry
 
-    def __init__(self, schedule=None, logger=None,
-            max_interval=None):
+    def __init__(self, schedule=None, logger=None, max_interval=None,
+            **kwargs):
+        UserDict.__init__(self)
+        if schedule is None:
+            schedule = {}
         self.data = schedule
-        if self.data is None:
-            self.data = {}
-        self.logger = logger or log.get_default_logger()
+        self.logger = logger or log.get_default_logger(name="celery.beat")
         self.max_interval = max_interval or conf.CELERYBEAT_MAX_LOOP_INTERVAL
-
-        self.cleanup()
         self.setup_schedule()
 
     def maybe_due(self, entry, connection=None):
         is_due, next_time_to_run = entry.is_due()
+
         if is_due:
             self.logger.debug("Scheduler: Sending due task %s" % entry.name)
             try:
@@ -160,68 +173,110 @@ class Scheduler(UserDict):
         return min(remaining_times + [self.max_interval])
 
     def reserve(self, entry):
-        new_entry = self.schedule[entry.name] = entry.next()
+        new_entry = self[entry.name] = entry.next()
         return new_entry
 
-    def apply_async(self, entry, **kwargs):
+    def apply_async(self, entry, connection=None, **kwargs):
         # Update timestamps and run counts before we actually execute,
         # so we have that done if an exception is raised (doesn't schedule
         # forever.)
         entry = self.reserve(entry)
 
-        print("APPLYING: %s" % (entry, ))
-
         try:
-            result = send_task(entry.name, entry.args, entry.kwargs,
-                               **entry.options)
+            result = self.send_task(entry.name, entry.args, entry.kwargs,
+                                    connection=connection, **entry.options)
         except Exception, exc:
             raise SchedulingError("Couldn't apply scheduled task %s: %s" % (
                     entry.name, exc))
         return result
 
-    def maybe_schedule(self, s, relative=False):
-        if isinstance(s, int):
-            return timedelta(seconds=s)
-        if isinstance(s, timedelta):
-            return schedule(s, relative)
-        return s
+    def send_task(self, *args, **kwargs): # pragma: no cover
+        return send_task(*args, **kwargs)
 
     def setup_schedule(self):
-        self.data = self.dict_to_entries(conf.CELERYBEAT_SCHEDULE)
-
-    def dict_to_entries(self, dict_):
-        entries = {}
-        for name, entry in dict_.items():
-            relative = entry.pop("relative", None)
-            entry["schedule"] = self.maybe_schedule(entry["schedule"],
-                                                    relative)
-            entries[name] = self.Entry(**entry)
-        return entries
-
-    def cleanup(self):
         pass
+
+    def sync(self):
+        pass
+
+    def close(self):
+        self.sync()
+
+    def add(self, **kwargs):
+        entry = self.Entry(**kwargs)
+        self[entry.name] = entry
+        return entry
+
+    def update_from_dict(self, dict_):
+        self.update(dict((name, self.Entry(name, **entry))
+                            for name, entry in dict_.items()))
+
+    def merge_inplace(self, b):
+        A, B = set(self.keys()), set(b.keys())
+
+        # Remove items from disk not in the schedule anymore.
+        for key in A ^ B:
+            self.pop(key, None)
+
+        # Update and add new items in the schedule
+        for key in B:
+            entry = self.Entry(**dict(b[key]))
+            if self.get(key):
+                self[key].update(entry)
+            else:
+                self[key] = entry
+
+    def get_schedule(self):
+        return self.data
 
     @property
     def schedule(self):
-        return self.data
+        return self.get_schedule()
 
 
-class ClockService(object):
-    scheduler_cls = Scheduler
-    open_schedule = lambda self, filename: shelve.open(filename)
+class PersistentScheduler(Scheduler):
+    persistence = shelve
+
+    _store = None
+
+    def __init__(self, *args, **kwargs):
+        self.schedule_filename = kwargs.get("schedule_filename")
+        Scheduler.__init__(self, *args, **kwargs)
+
+    def setup_schedule(self):
+        self._store = self.persistence.open(self.schedule_filename)
+        self.data = self._store
+        self.merge_inplace(conf.CELERYBEAT_SCHEDULE)
+        self.sync()
+        self.data = self._store
+
+    def sync(self):
+        if self._store is not None:
+            self.logger.debug("CeleryBeat: Syncing schedule to disk...")
+            self._store.sync()
+
+    def close(self):
+        self.sync()
+        self._store.close()
+
+
+class Service(object):
+    scheduler_cls = PersistentScheduler
 
     def __init__(self, logger=None,
             max_interval=conf.CELERYBEAT_MAX_LOOP_INTERVAL,
             schedule=conf.CELERYBEAT_SCHEDULE,
             schedule_filename=conf.CELERYBEAT_SCHEDULE_FILENAME,
             scheduler_cls=None):
-        self.logger = logger or log.get_default_logger()
         self.max_interval = max_interval
         self.scheduler_cls = scheduler_cls or self.scheduler_cls
+        self.logger = logger or log.get_default_logger(name="celery.beat")
+        self.schedule = schedule
+        self.schedule_filename = schedule_filename
+
+        self._scheduler = None
         self._shutdown = threading.Event()
         self._stopped = threading.Event()
-        self.schedule = schedule
-        self._scheduler = None
         silence = self.max_interval < 60 and 10 or 1
         self.debug = log.SilenceRepeated(self.logger.debug,
                                          max_iterations=silence)
@@ -237,19 +292,18 @@ class ClockService(object):
 
         try:
             try:
-                while True:
-                    if self._shutdown.isSet():
-                        break
+                while not self._shutdown.isSet():
                     interval = self.scheduler.tick()
                     self.debug("Celerybeat: Waking up %s." % (
                             humanize_seconds(interval, prefix="in ")))
                     time.sleep(interval)
             except (KeyboardInterrupt, SystemExit):
-                self.sync()
+                self._shutdown.set()
         finally:
             self.sync()
 
     def sync(self):
+        self.scheduler.close()
         self._stopped.set()
 
     def stop(self, wait=False):
@@ -260,45 +314,47 @@ class ClockService(object):
     @property
     def scheduler(self):
         if self._scheduler is None:
+            filename = self.schedule_filename
             self._scheduler = instantiate(self.scheduler_cls,
-                                          schedule=self.schedule,
+                                          schedule_filename=filename,
                                           logger=self.logger,
                                           max_interval=self.max_interval)
+            self._scheduler.update_from_dict(self.schedule)
         return self._scheduler
 
 
 class _Threaded(threading.Thread):
-    """Embedded clock service using threading."""
+    """Embedded task scheduler using threading."""
 
     def __init__(self, *args, **kwargs):
         super(_Threaded, self).__init__()
-        self.clockservice = ClockService(*args, **kwargs)
+        self.service = Service(*args, **kwargs)
         self.setDaemon(True)
 
     def run(self):
-        self.clockservice.start()
+        self.service.start()
 
     def stop(self):
-        self.clockservice.stop(wait=True)
+        self.service.stop(wait=True)
 
 
 class _Process(multiprocessing.Process):
-    """Embedded clock service using multiprocessing."""
+    """Embedded task scheduler using multiprocessing."""
 
     def __init__(self, *args, **kwargs):
         super(_Process, self).__init__()
-        self.clockservice = ClockService(*args, **kwargs)
+        self.service = Service(*args, **kwargs)
 
     def run(self):
         platform.reset_signal("SIGTERM")
-        self.clockservice.start(embedded_process=True)
+        self.service.start(embedded_process=True)
 
     def stop(self):
-        self.clockservice.stop()
+        self.service.stop()
         self.terminate()
 
 
-def EmbeddedClockService(*args, **kwargs):
+def EmbeddedService(*args, **kwargs):
     """Return embedded clock service.
 
     :keyword thread: Run threaded instead of as a separate process.

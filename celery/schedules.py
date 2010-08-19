@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyparsing import (Word, Literal, ZeroOrMore, Optional,
                        Group, StringEnd, alphas)
 
@@ -29,6 +29,11 @@ class schedule(object):
         if rem == 0:
             return True, timedelta_seconds(self.run_every)
         return False, rem
+
+    def __eq__(self, other):
+        if isinstance(other, schedule):
+            return self.run_every == other.run_every
+        return self.run_every == other
 
 
 class crontab_parser(object):
@@ -210,6 +215,11 @@ class crontab(schedule):
         self.day_of_week = self._expand_cronspec(day_of_week, 7)
         self.nowfun = nowfun
 
+    def __reduce__(self):
+        return (self.__class__, (self.minute,
+                                 self.hour,
+                                 self.day_of_week), None)
+
     def remaining_estimate(self, last_run_at):
         # remaining_estimate controls the frequency of scheduler
         # ticks. The scheduler needs to wake up every second in this case.
@@ -224,3 +234,18 @@ class crontab(schedule):
                    now.hour in self.hour and
                    now.minute in self.minute)
         return due, when
+
+    def __eq__(self, other):
+        if isinstance(other, crontab):
+            return (other.day_of_week == self.day_of_week and
+                    other.hour == self.hour and
+                    other.minute == self.minute)
+        return other is self
+
+
+def maybe_schedule(s, relative=False):
+    if isinstance(s, int):
+        s = timedelta(seconds=s)
+    if isinstance(s, timedelta):
+        return schedule(s, relative)
+    return s
