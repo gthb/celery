@@ -209,6 +209,9 @@ class crontab(schedule):
         self.minute = self._expand_cronspec(minute, 60)
         self.day_of_week = self._expand_cronspec(day_of_week, 7)
         self.nowfun = nowfun
+        self.hour_spec = hour
+        self.minute_spec = minute
+        self.day_of_week_spec = day_of_week
 
     def remaining_estimate(self, last_run_at):
         # remaining_estimate controls the frequency of scheduler
@@ -224,3 +227,14 @@ class crontab(schedule):
                    now.hour in self.hour and
                    now.minute in self.minute)
         return due, when
+
+    def __repr__(self):
+        return 'crontab(%s)' % ', '.join('%s=%r' % (param_name, param_value)
+            for param_name, param_value in zip(
+                ('minute', 'hour', 'day_of_week', 'nowfun'),
+                (self.minute_spec, self.hour_spec, self.day_of_week_spec,
+                    self.nowfun)
+            )
+            if ((param_value != datetime.now) if param_name == 'nowfun'
+                else param_value != '*')
+            )
