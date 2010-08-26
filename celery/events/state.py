@@ -56,6 +56,9 @@ class Task(Element):
                     "result", "eta", "runtime", "expires",
                     "exception")
 
+    _merge_rules = {states.RECEIVED: ("name", "args", "kwargs",
+                                      "retries", "eta", "expires")}
+
     _defaults = dict(uuid=None,
                      name=None,
                      state=states.PENDING,
@@ -92,40 +95,45 @@ class Task(Element):
     def ready(self):
         return self.state in states.READY_STATES
 
-    def update(self, d, **extra):
+    def update(self, state, timestamp, fields):
         if self.worker:
-            self.worker.on_heartbeat(timestamp=time.time())
-        return super(Task, self).update(d, **extra)
+            self.worker.on_heartbeat(timestamp=timestamp)
+        if state < self.state:
+            self.merge(state, timestamp, fields)
+        else:
+            self.state = state
+            self.timestamp = timestamp
+            super(Task, self).update(fields)
+
+    def merge(self, state, timestamp, fields):
+        keep = self._merge_rules.get(state)
+        if keep is not None:
+            fields = dict((key, fields[key]) for key in keep)
+            super(Task, self).update(fields)
 
     def on_received(self, timestamp=None, **fields):
         self.received = timestamp
-        self.state = "RECEIVED"
-        self.update(fields, timestamp=timestamp)
+        self.update(states.RECEIVED, timestamp, fields)
 
     def on_started(self, timestamp=None, **fields):
-        self.state = states.STARTED
         self.started = timestamp
-        self.update(fields, timestamp=timestamp)
+        self.update(states.STARTED, timestamp, fields)
 
     def on_failed(self, timestamp=None, **fields):
-        self.state = states.FAILURE
         self.failed = timestamp
-        self.update(fields, timestamp=timestamp)
+        self.update(states.FAILURE, timestamp, fields)
 
     def on_retried(self, timestamp=None, **fields):
-        self.state = states.RETRY
         self.retried = timestamp
-        self.update(fields, timestamp=timestamp)
+        self.update(states.RETRY, timestamp, fields)
 
     def on_succeeded(self, timestamp=None, **fields):
-        self.state = states.SUCCESS
         self.succeeded = timestamp
-        self.update(fields, timestamp=timestamp)
+        self.update(states.SUCCESS, timestamp, fields)
 
     def on_revoked(self, timestamp=None, **fields):
-        self.state = states.REVOKED
         self.revoked = timestamp
-        self.update(fields, timestamp=timestamp)
+        self.update(states.REVOKED, timestamp, fields)
 
 
 class State(object):
@@ -135,6 +143,15 @@ class State(object):
     _buffering = False
     buffer = deque()
     frozen = False
+
+    def __init__(self, callback=None,
+            max_workers_in_memory=5000, max_tasks_in_memory=10000):
+        self.workers = LocalCache(max_workers_in_memory)
+        self.tasks = LocalCache(max_tasks_in_memory)
+        self.event_callback = callback
+        self.group_handlers = {"worker": self.worker_event,
+                               "task": self.task_event}
+        self._resource = RLock()
 
     def freeze(self, buffer=True):
         """Stop recording the event stream.
@@ -182,15 +199,6 @@ class State(object):
         finally:
             self.thaw(replay=True)
 
-    def __init__(self, callback=None,
-            max_workers_in_memory=5000, max_tasks_in_memory=10000):
-        self.workers = LocalCache(max_workers_in_memory)
-        self.tasks = LocalCache(max_tasks_in_memory)
-        self.event_callback = callback
-        self.group_handlers = {"worker": self.worker_event,
-                               "task": self.task_event}
-        self._resource = RLock()
-
     def clear_tasks(self, ready=True):
         if ready:
             self.tasks = dict((uuid, task)
@@ -218,22 +226,22 @@ class State(object):
                     hostname=hostname, **kwargs)
         return worker
 
-    def get_or_create_task(self, uuid, **kwargs):
+    def get_or_create_task(self, uuid):
         """Get or create task by uuid."""
         try:
-            task = self.tasks[uuid]
-            task.update(kwargs)
+            return self.tasks[uuid]
         except KeyError:
-            task = self.tasks[uuid] = Task(uuid=uuid, **kwargs)
-        return task
+            task = self.tasks[uuid] = Task(uuid=uuid)
+            return task
 
     def worker_event(self, type, fields):
         """Process worker event."""
-        hostname = fields.pop("hostname")
-        worker = self.get_or_create_worker(hostname)
-        handler = getattr(worker, "on_%s" % type)
-        if handler:
-            handler(**fields)
+        hostname = fields.pop("hostname", None)
+        if hostname:
+            worker = self.get_or_create_worker(hostname)
+            handler = getattr(worker, "on_%s" % type, None)
+            if handler:
+                handler(**fields)
 
     def task_event(self, type, fields):
         """Process task event."""
@@ -241,7 +249,7 @@ class State(object):
         hostname = fields.pop("hostname")
         worker = self.get_or_create_worker(hostname)
         task = self.get_or_create_task(uuid)
-        handler = getattr(task, "on_%s" % type)
+        handler = getattr(task, "on_%s" % type, None)
         if type == "received":
             self.task_count += 1
         if handler:

@@ -7,6 +7,7 @@ import sys
 import traceback
 
 from multiprocessing import current_process
+from multiprocessing import util as mputil
 
 from celery import conf
 from celery import signals
@@ -60,14 +61,12 @@ def setup_logging_subsystem(loglevel=conf.CELERYD_LOG_LEVEL, logfile=None,
         **kwargs):
     global _setup
     if not _setup:
-        ensure_process_aware_logger()
-        logging.Logger.manager.loggerDict.clear()
-        from multiprocessing import util as mputil
         try:
-            if mputil._logger is not None:
-                mputil.logger = None
+            mputil._logger = None
         except AttributeError:
             pass
+        ensure_process_aware_logger()
+        logging.Logger.manager.loggerDict.clear()
         receivers = signals.setup_logging.send(sender=None,
                                                loglevel=loglevel,
                                                logfile=logfile,
@@ -75,8 +74,10 @@ def setup_logging_subsystem(loglevel=conf.CELERYD_LOG_LEVEL, logfile=None,
                                                colorize=colorize)
         if not receivers:
             root = logging.getLogger()
-            _setup_logger(root, logfile, format, colorize, **kwargs)
-            root.setLevel(loglevel)
+            mp = mputil.get_logger()
+            for logger in (root, mp):
+                _setup_logger(logger, logfile, format, colorize, **kwargs)
+                logger.setLevel(loglevel)
         _setup = True
         return receivers
 
@@ -119,7 +120,7 @@ def setup_logger(loglevel=conf.CELERYD_LOG_LEVEL, logfile=None,
 
 def setup_task_logger(loglevel=conf.CELERYD_LOG_LEVEL, logfile=None,
         format=conf.CELERYD_TASK_LOG_FORMAT, colorize=conf.CELERYD_LOG_COLOR,
-        task_kwargs=None, root=True, **kwargs):
+        task_kwargs=None, **kwargs):
     """Setup the task logger. If ``logfile`` is not specified, then
     ``stderr`` is used.
 
@@ -131,15 +132,9 @@ def setup_task_logger(loglevel=conf.CELERYD_LOG_LEVEL, logfile=None,
     task_kwargs.setdefault("task_id", "-?-")
     task_name = task_kwargs.get("task_name")
     task_kwargs.setdefault("task_name", "-?-")
-    if not root:
-        logger = _setup_logger(get_task_logger(loglevel, task_name),
-                               logfile, format, colorize, **kwargs)
-    else:
-        setup_logging_subsystem(loglevel, logfile, format, colorize, **kwargs)
-        logger = get_task_logger(name=task_name)
+    logger = _setup_logger(get_task_logger(loglevel, task_name),
+                            logfile, format, colorize, **kwargs)
     return LoggerAdapter(logger, task_kwargs)
-
-
 
 
 def _setup_logger(logger, logfile, format, colorize,
@@ -147,6 +142,7 @@ def _setup_logger(logger, logfile, format, colorize,
 
     if logger.handlers: # Logger already configured
         return logger
+
     handler = _detect_handler(logfile)
     handler.setFormatter(formatter(format, use_color=colorize))
     logger.addHandler(handler)

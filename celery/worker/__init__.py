@@ -8,15 +8,12 @@ import logging
 import traceback
 from multiprocessing.util import Finalize
 
-from celery.utils.timer2 import Timer
-
 from celery import beat
 from celery import conf
 from celery import log
 from celery import registry
 from celery import platform
 from celery import signals
-from celery.log import setup_logger
 from celery.utils import noop, instantiate
 
 from celery.worker import state
@@ -134,7 +131,7 @@ class WorkController(object):
         self.loglevel = loglevel or self.loglevel
         self.concurrency = concurrency or self.concurrency
         self.logfile = logfile or self.logfile
-        self.logger = setup_logger(loglevel, logfile)
+        self.logger = log.get_default_logger()
         self.hostname = hostname or socket.gethostname()
         self.embed_clockservice = embed_clockservice
         self.ready_callback = ready_callback
@@ -259,4 +256,3 @@ class WorkController(object):
 
     def on_timer_tick(self, delay):
         self.timer_debug("Scheduler wake-up! Next eta %s secs." % delay)
-

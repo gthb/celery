@@ -78,12 +78,10 @@ from __future__ import generators
 import socket
 import warnings
 
-from datetime import datetime
-
 from carrot.connection import AMQPConnectionException
 
 from celery import conf
-from celery.utils import noop, retry_over_time, maybe_iso8601
+from celery.utils import noop, retry_over_time
 from celery.worker.job import TaskRequest, InvalidTaskError
 from celery.worker.control import ControlDispatch
 from celery.worker.heartbeat import Heart
@@ -314,13 +312,22 @@ class CarrotListener(object):
              the message was: %s" % message_data))
         message.ack()
 
+    def maybe_conn_error(self, fun):
+        try:
+            fun()
+        except Exception: # TODO kombu.connection_errors
+            pass
+
     def close_connection(self):
         self.logger.debug("CarrotListener: "
                           "Closing consumer channel...")
-        self.task_consumer = self.task_consumer and self.task_consumer.close()
+        if self.task_consumer:
+            self.task_consumer = \
+                    self.maybe_conn_error(self.task_consumer.close)
         self.logger.debug("CarrotListener: "
                           "Closing connection to broker...")
-        self.connection = self.connection and self.connection.close()
+        if self.connection:
+            self.connection = self.maybe_conn_error(self.connection.close)
 
     def stop_consumers(self, close=True):
         """Stop consuming."""
@@ -334,11 +341,12 @@ class CarrotListener(object):
 
         self.logger.debug("TaskConsumer: Cancelling consumers...")
         if self.task_consumer:
-            self.task_consumer.cancel()
+            self.maybe_conn_error(self.task_consumer.cancel)
 
         if self.event_dispatcher:
             self.logger.debug("EventDispatcher: Shutting down...")
-            self.event_dispatcher = self.event_dispatcher.close()
+            self.event_dispatcher = \
+                    self.maybe_conn_error(self.event_dispatcher.close)
 
         if close:
             self.close_connection()
@@ -378,6 +386,10 @@ class CarrotListener(object):
         self.broadcast_consumer = BroadcastConsumer(self.connection,
                                                     hostname=self.hostname)
         self.task_consumer.register_callback(self.receive_message)
+
+        # Flush events sent while connection was down.
+        if self.event_dispatcher:
+            self.event_dispatcher.flush()
         self.event_dispatcher = EventDispatcher(self.connection,
                                                 hostname=self.hostname,
                                                 enabled=self.send_events)

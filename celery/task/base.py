@@ -1,8 +1,6 @@
 import sys
 import warnings
 
-from datetime import timedelta
-
 from celery import conf
 from celery.backends import default_backend
 from celery.exceptions import MaxRetriesExceededError, RetryTaskError
@@ -24,7 +22,7 @@ in celery v3.0.
 Please use the CELERYBEAT_SCHEDULE setting instead:
 
     CELERYBEAT_SCHEDULE = {
-        name: dict(name=task_name, schedule=run_every,
+        name: dict(task=task_name, schedule=run_every,
                    args=(), kwargs={}, options={}, relative=False)
     }
 
@@ -624,7 +622,7 @@ class PeriodicTask(Task):
         # For backward compatibility, add the periodic task to the
         # configuration schedule instead.
         conf.CELERYBEAT_SCHEDULE[self.name] = {
-                "name": self.name,
+                "task": self.name,
                 "schedule": self.run_every,
                 "args": (),
                 "kwargs": {},
