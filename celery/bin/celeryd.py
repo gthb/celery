@@ -67,6 +67,7 @@ import sys
 import socket
 import logging
 import optparse
+import platform as _platform
 import warnings
 import multiprocessing
 
@@ -80,6 +81,9 @@ from celery.utils import get_full_cls_name
 from celery.worker import WorkController
 from celery.exceptions import ImproperlyConfigured
 from celery.routes import Router
+
+SYSTEM = _platform.system()
+IS_OSX = SYSTEM == "Darwin"
 
 STARTUP_INFO_FMT = """
 Configuration ->
@@ -305,17 +309,32 @@ class Worker(object):
                                 max_tasks_per_child=self.max_tasks_per_child,
                                 task_time_limit=self.task_time_limit,
                                 task_soft_time_limit=self.task_soft_time_limit)
+        self.install_platform_tweaks(worker)
+        worker.start()
+
+    def install_platform_tweaks(self, worker):
+        """Install platform specific tweaks and workarounds."""
+        if IS_OSX:
+            self.osx_proxy_detection_workaround()
 
         # Install signal handler so SIGHUP restarts the worker.
         if not self._isatty:
             # only install HUP handler if detached from terminal,
             # so closing the terminal window doesn't restart celeryd
             # into the background.
-            install_worker_restart_handler(worker)
+            if IS_OSX:
+                # OS X can't exec from a process using threads.
+                # See http://github.com/ask/celery/issues#issue/152
+                install_HUP_not_supported_handler(worker)
+            else:
+                install_worker_restart_handler(worker)
         install_worker_term_handler(worker)
         install_worker_int_handler(worker)
         signals.worker_init.send(sender=worker)
-        worker.start()
+
+    def osx_proxy_detection_workaround(self):
+        """See http://github.com/ask/celery/issues#issue/161"""
+        os.environ.setdefault("celery_dummy_proxy", "set_by_celeryd")
 
 
 def install_worker_int_handler(worker):
@@ -371,6 +390,15 @@ def install_worker_restart_handler(worker):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     platform.install_signal_handler("SIGHUP", restart_worker_sig_handler)
+
+
+def install_HUP_not_supported_handler(worker):
+
+    def warn_on_HUP_handler(signum, frame):
+        worker.logger.error("SIGHUP not supported: "
+            "Restarting with HUP is unstable on this platform!")
+
+    platform.install_signal_handler("SIGHUP", warn_on_HUP_handler)
 
 
 def parse_options(arguments):
