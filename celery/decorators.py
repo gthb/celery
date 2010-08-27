@@ -85,3 +85,39 @@ def periodic_task(**options):
 
     """
     return task(**dict({"base": PeriodicTask}, **options))
+
+
+def synchronized(cls):
+    """Class decorator to synchronize execution of a task's run method.
+
+    This prevents parallel execution of two instances of the same task within
+    the same worker. If an instance of the same task is running in the same
+    worker, the second invocation calls :meth:`~celery.task.base.Task.retry`
+    is called instead of running the task.
+
+    Note that this applies to the task class, so `@synchronized` should
+    appear before `@task` or `@periodic_task` when tasks are defined with
+    decorators.
+
+    .. code-block:: python
+
+        @synchronized
+        @task
+        def cleanup_database(**kwargs):
+            logger = cleanup_database.get_logger(**kwargs)
+            logger.warn("Task running...")
+    """
+    from multiprocessing import Lock
+    cls.lock = Lock()
+    cls.unsynchronized_run = cls.run
+    @wraps(cls.unsynchronized_run)
+    def wrapper(*args, **kwargs):
+        if cls.lock.acquire(False):
+            try:
+                cls.unsynchronized_run(*args, **kwargs)
+            finally:
+                cls.lock.release()
+        else:
+            cls.retry(args=args, kwargs=kwargs)
+    cls.run = wrapper
+    return cls
